@@ -1,11 +1,12 @@
 #perspective drawing ASCII
 import math
 import numpy as np
+import subprocess
 
 #setting up ACSII display stuff
 pixelAspectRatio = 2.0 #this is the ratio height / width for one character of text in whatever terminal you're using. Will make it adjust to different terminals later.
 screenAspectRatio = 1.2 #this is the ratio height / width for the whole screen
-screenWidth = 100
+screenWidth = 112
 screenHeight = int((screenAspectRatio*screenWidth) / pixelAspectRatio)
 leftBound = int(-screenWidth / 2)
 rightBound = int(screenWidth / 2)
@@ -30,9 +31,8 @@ rot = [np.array([[0,0,0],
 playerPos = [0,0,0]
 yawpitchroll = [0,0,0]
 
-playerStep = 0.25
-playerStep = 1
-playerRotate = 15
+playerStep = 0.1
+playerRotate = 3
 playerRotate = math.radians(playerRotate)
 playerRotationChanged = [True]
 
@@ -135,8 +135,6 @@ def getAbsoluteXYZ(apparentXYZ):
     absoluteXYZ = np.dot(unrot, deltaXYZ)
 
     return absoluteXYZ
-
-
 
 
 #given a point's apparent coordinates, maps to a point in 2d space.
@@ -247,13 +245,49 @@ def printHelp():
     print("")
     print("x - quit")
     print("m - make a point")
+
+#live input a single character
+class Getch:
+    """Gets a single character from standard input.  Does not echo to the
+screen."""
+    def __init__(self):
+        try:
+            self.impl = GetchWindows()
+        except ImportError:
+            self.impl = GetchUnix()
+
+    def __call__(self): return self.impl()
+
+
+class GetchUnix:
+    def __init__(self):
+        import tty, sys
+
+    def __call__(self):
+        import sys, tty, termios
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setraw(sys.stdin.fileno())
+            ch = sys.stdin.read(1)
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        return ch
+
+
+class GetchWindows:
+    def __init__(self):
+        import msvcrt
+
+    def __call__(self):
+        import msvcrt
+        return msvcrt.getch()
+
 #waits for player input such as movement/rotation
 def takePlayerInput():
     print("h - help")
 
-    theInput = input()
-    if(len(theInput) > 1):
-        theInput = theInput[0]
+    theInput = Getch().__call__()
 
     #misc
     if theInput == 'm':
@@ -323,6 +357,8 @@ def takePlayerInput():
         yawpitchroll[2] += playerRotate
         playerRotationChanged[0] = True
 
+def clearTerm():
+    subprocess.call(["clear"])
 
 addPoint(0,0,0,'A')
 addPoint(1,0,0,'B')
@@ -335,10 +371,11 @@ addPoint(1,1,1,'B')
 addPoint(0.5,0.4,0.3,'C')
 addPoint(0,3,0,'o')
 
-#TODO use bash interaction to clear terminal output and reprint as well as automatically take user input in real time
+clearTerm()
 #main loop
 while not gameOver[0]:
     clipAngles()
     printEverything()
     printPlayerInfo()
     takePlayerInput()
+    clearTerm()
