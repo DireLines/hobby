@@ -21,9 +21,21 @@ def getBits(byte):
 		bitstring += str((byte >> i) & 1)
 	return bitstring
 
+#gets bits of a list of bytes most significant first
+def getConcatBits(bytes):
+	bitstring = ''
+	for byte in bytes:
+		byte = ord(byte)
+		for i in reversed(range(8)):
+			bitstring += str((byte >> i) & 1)
+	return bitstring
+
 #byte --> decimal
 def getIntValue(byte):
 	return int(getBits(byte),base=2)
+
+def getConcatIntValue(bytes):
+	return int(getConcatBits(bytes),base=2)
 
 #finds all indices of a sublist within a list. Returns a list of tuples which are (beginning index of sublist, end index of sublist)
 #from https://stackoverflow.com/questions/17870544/find-starting-and-ending-indices-of-sublist-in-list
@@ -43,19 +55,26 @@ def printByteInfo(bytes):
 		strslice = strr[2:len(strr) - 1]
 		if(strslice == ' '):
 			strslice = 'space'
-		print(i,":",strslice,"       ",getIntValue(byte),"         ",hex(getIntValue(byte)),"       ",getBits(byte))
+		print(i,":",getBits(byte),"       ",getIntValue(byte),"         ",hex(getIntValue(byte)),"       ",strslice)
 
 #takes in a midi file and list of track numbers and creates a list of note on and off events
 #format of each event:
 #[note the event occurs in, absolute time of the event, 'on' or 'off', track of origin]
+#or, for time signature and tempo changes
+#[-1,absolute time, 'tempo change' or 'time signature change',(relevant info from MIDI message)]
 #TODO make the timestamps take into account tempo change messages so that they reflect real playing time
 def createEventList(filename, tracknums):
 	result = []
 	bytes = getByteList(filename)
 	# print(bytes)
 	if(bytes[0:4] == [b'M', b'T', b'h', b'd']):
+		sizeOfHeader = getConcatIntValue(bytes[4:8])
+		midiType = getConcatIntValue(bytes[8:10])
+		numTracks = getConcatIntValue(bytes[10:12])
+		numTicksPerQuarterNote = getConcatIntValue(bytes[12:14])
+		result.append([-1,-1,numTicksPerQuarterNote])
 		trackHeaderIndices = findSubList([b'M', b'T', b'r', b'k'],bytes)
-		if len(trackHeaderIndices) > 0:
+		if len(trackHeaderIndices) == numTracks and len(trackHeaderIndices) > 0:
 			print("Number of tracks:",len(trackHeaderIndices))
 			for tracknum in tracknums:
 				if len(trackHeaderIndices) > tracknum:
@@ -70,6 +89,7 @@ def createEventList(filename, tracknums):
 					i = 0
 					absoluteTime = 0
 					lastEventWasNoteOn = False
+
 					while(i < len(trackbytes)):
 						#interpret delta time
 						deltaTimeBits = ''
@@ -84,9 +104,11 @@ def createEventList(filename, tracknums):
 						absoluteTime += deltaTime
 						# print("got delta time of",deltaTime)
 						# print("absolute time is now",absoluteTime)
+						#print("tempo:",tempo)
 
 						#interpret MIDI message. If you don't know how, say which message caused you a problem.
 						messageType = getBits(trackbytes[i])[:4]
+						# print("messageType",messageType)
 						if(messageType == '1001'):#note on
 							lastEventWasNoteOn = True
 							i += 1
@@ -110,9 +132,36 @@ def createEventList(filename, tracknums):
 						elif(messageType == '1111'): #could mean a number of things
 							fullMessage = getBits(trackbytes[i])
 							if(fullMessage == '11111111'):#it's a meta message
-								i += 2
+								i += 1
+								metaMessageType = getBits(trackbytes[i])
+								# print("metaMessageType",metaMessageType)
+								i += 1
 								metaMessageLength = getIntValue(trackbytes[i])
-								i += metaMessageLength + 1
+								# print("metaMessageLength",metaMessageLength)
+								if metaMessageType == '01010001':#tempo change
+									endIndex = i + metaMessageLength + 1
+									bitString = ''
+									i += 1
+									while i < endIndex:
+										bitString += getBits(trackbytes[i])
+										i += 1
+									tempo = int(bitString,base=2)
+									event = [-1,absoluteTime,'tempo change',tempo]
+									result.append(event)
+								elif metaMessageType == '01011000':#time signature change
+									i += 1
+									timeSigNumer = getIntValue(trackbytes[i])
+									i += 1
+									timeSigDenom = getIntValue(trackbytes[i])
+									i += 1
+									timeSigClocksPerClick = getIntValue(trackbytes[i])
+									i += 1
+									timeSig32ndNotesPerBeat = getIntValue(trackbytes[i])
+									i += 1
+									event = [-1,absoluteTime,'time signature change',timeSig32ndNotesPerBeat]
+									result.append(event)
+								else:
+									i += metaMessageLength + 1
 						elif(messageType == '1100'):#program change
 							i += 2
 						elif(messageType == '1011'):#control change
@@ -136,12 +185,17 @@ def createEventList(filename, tracknums):
 							i += 1
 						else:
 							print("was unable to parse message with message type",messageType,"at line",i)
+							printByteInfo([trackbytes[i]])
 							i = len(trackbytes)
 
 				else:
 					print("The file doesn't have enough tracks to have track number", tracknum)
+		elif len(trackHeaderIndices) < numTracks:
+			print("The file has fewer MIDI track headers than tracks according to the file header so it's probably corrupted")
+		elif len(trackHeaderIndices) > numTracks:
+			print("the file has more track headers than tracks according to the file header. Look for a false positive")
 		else:
-			print("The file doesn't have any valid MIDI track headers so it's probably corrupted")
+			print("the file has no tracks")
 	else:
 		print("That file doesn't have a proper MIDI header so either it's not a MIDI file or it's a corrupted MIDI file")
 	return result
@@ -173,6 +227,70 @@ def createEventList(filename, tracknums):
 
 
 #Start of methods which are specific to my game
+
+#given a list of events, including tempo changes, finds absolute time in microseconds 
+def adjustForTimeSignatureChanges(eventList):
+	eventList.sort(key = lambda x: int(x[1]))
+	tempo = 500000 #microseconds per quarter note
+	timeSig32ndNotesPerBeat = 8
+	#header with pulses per quarter note guaranteed to be at the start
+	pulsesPerQuarterNote = eventList[0][2]
+	del eventList[0]
+	# print(tempo,timeSig32ndNotesPerBeat,pulsesPerQuarterNote)
+
+	for event in eventList:
+		event.append(event[1])
+		event[4] *= (tempo * timeSig32ndNotesPerBeat) / (8 * pulsesPerQuarterNote)
+		event[4] = int(event[4])
+
+	i = 0
+	while i < len(eventList):
+		if eventList[i][2] == 'tempo change':
+			tempo = eventList[i][3]
+			timeOfEventTicks = eventList[i][1]
+			timeOfEventMicroseconds = eventList[i][4]
+			j = i
+			while(j < len(eventList)):
+				timeMicroseconds = eventList[j][1]
+				timeMicroseconds -= timeOfEventTicks
+				timeMicroseconds *= (tempo * timeSig32ndNotesPerBeat) / (8 * pulsesPerQuarterNote)
+				timeMicroseconds += timeOfEventMicroseconds
+				timeMicroseconds = int(timeMicroseconds)
+				eventList[j][4] = timeMicroseconds
+				j += 1
+		elif eventList[i][2] == 'time signature change':
+			if(eventList[i][3] != timeSig32ndNotesPerBeat):
+				timeSig32ndNotesPerBeat = eventList[i][3]
+				timeOfEventTicks = eventList[i][1]
+				timeOfEventMicroseconds = eventList[i][4]
+				j = i
+				while(j < len(eventList)):
+					timeMicroseconds = eventList[j][1]
+					timeMicroseconds -= timeOfEventTicks
+					timeMicroseconds *= (tempo * timeSig32ndNotesPerBeat) / (8 * pulsesPerQuarterNote)
+					timeMicroseconds += timeOfEventMicroseconds
+					timeMicroseconds = int(timeMicroseconds)
+					eventList[j][4] = timeMicroseconds
+					j += 1
+		i += 1
+
+	#now event[4] is the time in microseconds for each event. 
+	#Later functions are expecting event[1] to contain time info
+	#so I will switch column 4 to column 1 and delete column 4
+	#also, I will trim out the time sig and tempo change events because they're not needed anywhere else
+	i = 0
+	lenEventList = len(eventList)
+	while i < lenEventList:
+		if eventList[i][0] == -1: #any time stuff
+			del eventList[i]
+			lenEventList -= 1
+		else:
+			eventList[i][1] = eventList[i][4]
+			del eventList[i][4]
+			i += 1
+
+	return eventList
+
 
 #gets time sorted list of events pertaining to the specified note
 def getEventsForNote(eventList,note):
@@ -230,6 +348,34 @@ def trimOverlappingEvents(eventList):
 		resultList.extend(eventsForNote)
 	return resultList
 
+#does what it says. used to find out how much time should be slowed by.
+#assumes first and last events have not been labeled yet
+def getMedianDeltaTimeBetweenOnEvents(events):
+	i = 1
+	lastOnIndex = 0
+	deltaList = []
+	while i < len(events):
+		if(events[i][2] == 'on'):
+			delta = events[i][1] - events[lastOnIndex][1]
+			deltaList.append(delta)
+			lastOnIndex = i
+		i += 1
+	deltaList.sort()
+	return deltaList[len(deltaList) // 2]
+
+#scales time values such that median delta time between on events corresponds to a certain magic number of seconds of gameplay
+#specified by numberOfSecondsToStretchTo
+#also converts microseconds to seconds
+def stretchTime(events):
+	medianTime = getMedianDeltaTimeBetweenOnEvents(events)
+	numberOfSecondsToStretchTo = 130
+	# print("medianTime:",medianTime)
+	for event in events:
+		event[1] *= (1000000 * numberOfSecondsToStretchTo) / medianTime
+		event[1] /= 1000000
+		event[1] = int(event[1])
+	return events
+
 #gets number of ticks note plays in the song
 #assumes overlaps have already been eliminated
 #which lets us assume even indices are on events and odd indices are off events
@@ -253,6 +399,25 @@ def countNoteFrequencies(eventList):
 			else:
 				freqs[event[0]] += 1
 	return freqs
+
+#starting at startTime seconds (normally where the last game ended),
+#finds all events less than duration seconds after startTime
+#and returns that slice of the array
+def trimToInterval(events,startTime,duration):
+	startIndex = 0
+	startHasBeenFound = False
+	stopIndex = 0
+	i = 0
+	while(i < len(events)):
+		if not (startHasBeenFound == True) and events[i][1] >= startTime:
+			startHasBeenFound = True
+			startIndex = i
+		if events[i][1] > duration + startTime:
+			stopIndex = i
+			i = len(events)
+		i += 1
+	return events[startIndex:stopIndex]
+
 
 #returns 4 dictionaries containing note:event index pairs
 def findFirstAndLastEventsForEachNote(eventList,timeSorted=True):
@@ -329,23 +494,50 @@ def labelFirstAndLastEventsForEachNote(eventList,timeSorted=True):
 def normalizeTimes(eventList,timeSorted=True):
 	if timeSorted == False:
 		eventList.sort(key = lambda x: int(x[1]))
-	lowestTime = eventList[0][1]
-	for event in eventList:
-		event[1] -= lowestTime
+	if len(eventList) > 0:
+		lowestTime = eventList[0][1]
+		for event in eventList:
+			event[1] -= lowestTime
 	return eventList
+
+#plays events back. should resemble the rhythm of the midi file
+def printEventsOverTimeMicro(eventList):
+	eventList.sort(key = lambda x: int(x[1]))
+	time.sleep(eventList[0][1] / 1000000)
+	print(eventList[0])
+	for i in range(1,len(eventList)):
+		time.sleep((eventList[i][1] - eventList[i-1][1]) / 1000000)
+		print(eventList[i])
+
+def printEventsOverTime(eventList):
+	eventList.sort(key = lambda x: int(x[1]))
+	time.sleep(eventList[0][1])
+	print(eventList[0])
+	for i in range(1,len(eventList)):
+		time.sleep(eventList[i][1] - eventList[i-1][1])
+		print(eventList[i])
 
 # brings everything together. Given filename and track numbers to be included from the command line arguments,
 # generates an initial list of game events and times they are associated with.
-#TODO make MIDI event ticks translate to real game time
-#TODO make startTime and duration arguments providable in real game time
-def createGameEventList(filename, tracknums):
+#TODO:
+#	-trimOverlappingEvents should handle big ol' fusterclucks of notes
+#	-labelFirstAndLastEventsForEachNote should remove off events for notes that start before the interval
+#	and create off events at the end of the interval for notes that end after it
+#   	-there should be a method to write events to a file for better integration with the rest of whatever game this is.
+def createGameEventList(filename, tracknums, startTime=0,duration=2500):
 	eventList = createEventList(filename,tracknums)
+	eventList = adjustForTimeSignatureChanges(eventList)
+	if(len(eventList) == 0):
+		print("there were no events except tempo changes")
+		return eventList
 	eventList = trimOverlappingEvents(eventList)
+	eventList = stretchTime(eventList)
 	eventList.sort(key = lambda x: int(x[1]))
+
+	eventList = trimToInterval(eventList,startTime,duration)
 	eventList = normalizeTimes(eventList)
 	eventList = labelFirstAndLastEventsForEachNote(eventList)
 	return eventList
-
 
 if(len(sys.argv) < 3):
 	print("Usage: python midiParsing.py [midi file to analyze] [track numbers to analyze]")
@@ -353,26 +545,27 @@ if(len(sys.argv) < 3):
 else:
 	filename = sys.argv[1]
 	tracknums = map(lambda x: int(x), sys.argv[2:])
+	# bytes = getByteList(filename)
+	# printByteInfo(bytes)
 	events = createGameEventList(filename,tracknums)
-
-
-	# freq = countNoteFrequencies(events)
-	# for thing in reversed(sorted(freq)):
-	# 	print(thing,freq[thing], getTimeSpentPlayingNote(events,thing))
-	noteSet = set([event[0] for event in events])
-	for note in noteSet:
-		eventsForNote = getEventsForNote(events,note)
-		print("")
-		print(note)
-		print(getTimeSpentPlayingNote(events,note))
-		out = ""
-		for i in range(len(eventsForNote)):
-			out += str(eventsForNote[i])
-			if(i % 2 == 1):
-				print(out)
-				out = ""
-	# for event in events:
-	# 	print(event)
+	for event in events:
+		print(event)
+	printEventsOverTime(events)
+	# # freq = countNoteFrequencies(events)
+	# # for thing in reversed(sorted(freq)):
+	# # 	print(thing,freq[thing], getTimeSpentPlayingNote(events,thing))
+	# noteSet = set([event[0] for event in events])
+	# for note in noteSet:
+	# 	eventsForNote = getEventsForNote(events,note)
+	# 	print("")
+	# 	print(note)
+	# 	print(getTimeSpentPlayingNote(events,note))
+	# 	out = ""
+	# 	for i in range(len(eventsForNote)):
+	# 		out += str(eventsForNote[i])
+	# 		if(i % 2 == 1):
+	# 			print(out)
+	# 			out = ""
 
 
 
