@@ -324,7 +324,11 @@ def trimOverlappingEvents(eventList):
 				notesPlayingCurrently -= 1
 				if notesPlayingCurrently == 0:
 					result.append(event)
+			if notesPlayingCurrently == -1:
+				print("hmm, notesPlayingCurrently has somehow dipped into negatives")
 		resultList.extend(result)
+		if notesPlayingCurrently > 0:
+			print("hmm, notesPlayingCurrently is still positive at the end")
 	return resultList
 
 #does what it says. used to find out how much time should be slowed by.
@@ -542,8 +546,7 @@ def printEventsOverTime(eventList):
 
 # brings everything together. Given filename and track numbers to be included from the command line arguments,
 # generates an initial list of game events and times they are associated with.
-#TODO: there should be a method to write events to a file for better integration with the rest of the game
-def createGameEventList(filename, tracknums, startTime=1500,duration=3600):
+def createGameEventList(filename, tracknums, startTime=0,duration=3600000000):
 	eventList = createEventList(filename,tracknums)
 	eventList = adjustForTimeSignatureChanges(eventList)
 	eventList = trimOverlappingEvents(eventList)
@@ -557,7 +560,10 @@ def createGameEventList(filename, tracknums, startTime=1500,duration=3600):
 	eventList.sort(key = lambda x: int(x[1]))
 	
 	#events are now finalized, so I will put them in a txt file.
-
+	with open("midiparseroutfile.txt","w") as outfile:
+		for event in eventList:
+			outfile.write(str(event))
+			outfile.write('\n')
 	return eventList
 
 if(len(sys.argv) < 3):
