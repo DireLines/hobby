@@ -62,7 +62,6 @@ def printByteInfo(bytes):
 #[note the event occurs in, absolute time of the event, 'on' or 'off', track of origin]
 #or, for time signature and tempo changes
 #[-1,absolute time, 'tempo change' or 'time signature change',(relevant info from MIDI message)]
-#TODO make the timestamps take into account tempo change messages so that they reflect real playing time
 def createEventList(filename, tracknums):
 	result = []
 	bytes = getByteList(filename)
@@ -302,50 +301,30 @@ def getEventsForNote(eventList,note):
 	return result
 
 # If event list has been created from merged tracks, return version where notes that are overlapping 
-# (same note, same time region, different tracks) blob together
+# (same note, same time region, different tracks) are put into an ordered sequence.
 # assumed to come before first and last events are labeled
 def trimOverlappingEvents(eventList):
 	noteSet = set([event[0] for event in eventList])
 	resultList = []
 	for note in noteSet:
 		eventsForNote = getEventsForNote(eventList,note)
-		#TODO handle general case / clusters of n overlapping notes, not just 2
-		#this actually occurs several times in note 55 of Little Fugue
-		onAndOffList = [event[2] for event in eventsForNote]
-		overlapIndices = findSubList(['on','on','off','off'],onAndOffList)
-		if(len(overlapIndices) > 0):
-			for overlap in overlapIndices:
-				on1 = eventsForNote[overlap[0]]
-				on2 = eventsForNote[overlap[0]+1]
-				off1 = eventsForNote[overlap[0]+2]
-				off2 = eventsForNote[overlap[0]+3]
-				if on1[1] == on2[1]: #if on events start at the same time
-					if off1[1] == off2[1]:#and end at the same time
-						on2track = on2[3]
-						eventsForNote[overlap[0]+1] = 'delete this'
-						if(on2track == off1[3]):
-							eventsForNote[overlap[0]+2] = 'delete this'
-						else:
-							eventsForNote[overlap[0]+3] = 'delete this'
-					else: #off2 is later than off1
-						off1track = off1[3]
-						eventsForNote[overlap[0]+2] = 'delete this'
-						if off1track == on1[3]:
-							eventsForNote[overlap[0]] = 'delete this'
-						else:
-							eventsForNote[overlap[0]+1] = 'delete this'
-				elif on2[1] != off1[1]:
-					#make a new off event in whichever track on1 is in which occurs exactly when on2 occurs
-					on2time = on2[1]
-					on2track = on2[3]
-					on1track = on1[3]
-					eventsForNote.append([note,on2time,'off',on1track])
-					#delete whichever existing off event occurs sooner, which is guaranteed to be off1 since events are time sorted
-					#edit the remaining off event to have the same track as on2
-					eventsForNote[overlap[0]+2] = 'delete this'
-					eventsForNote[overlap[0]+3][3] = on2track
-			eventsForNote = [x for x in eventsForNote if x != 'delete this']
-		resultList.extend(eventsForNote)
+		notesPlayingCurrently = 0
+		result = []
+		currentTrackPlaying = eventsForNote[0][3]
+		for event in eventsForNote:
+			if event[2] == 'on':
+				notesPlayingCurrently += 1
+				if notesPlayingCurrently == 1:
+					result.append(event)
+					currentTrackPlaying = event[3]
+				else:
+					result.append([note,event[1],'off',currentTrackPlaying])
+					result.append(event)
+			else:
+				notesPlayingCurrently -= 1
+				if notesPlayingCurrently == 0:
+					result.append(event)
+		resultList.extend(result)
 	return resultList
 
 #does what it says. used to find out how much time should be slowed by.
@@ -357,19 +336,36 @@ def getMedianDeltaTimeBetweenOnEvents(events):
 	while i < len(events):
 		if(events[i][2] == 'on'):
 			delta = events[i][1] - events[lastOnIndex][1]
-			deltaList.append(delta)
+			if(delta != 0):
+				deltaList.append(delta)
 			lastOnIndex = i
 		i += 1
 	deltaList.sort()
 	return deltaList[len(deltaList) // 2]
 
+def getMeanDeltaTimeBetweenOnEvents(events):
+	i = 1
+	lastOnIndex = 0
+	numEvents = 0
+	sum = 0
+	while i < len(events):
+		if(events[i][2] == 'on'):
+			delta = events[i][1] - events[lastOnIndex][1]
+			if(delta != 0):
+				sum += delta
+				numEvents += 1
+			lastOnIndex = i
+		i += 1
+	return (sum / numEvents)
+
 #scales time values such that median delta time between on events corresponds to a certain magic number of seconds of gameplay
 #specified by numberOfSecondsToStretchTo
 #also converts microseconds to seconds
-def stretchTime(events):
+def stretchTime(events,numberOfSecondsToStretchTo):
 	medianTime = getMedianDeltaTimeBetweenOnEvents(events)
-	numberOfSecondsToStretchTo = 130
-	# print("medianTime:",medianTime)
+	print("medianTime:",medianTime)
+	meanTime = getMeanDeltaTimeBetweenOnEvents(events)
+	print("meanTime:",meanTime)
 	for event in events:
 		event[1] *= (1000000 * numberOfSecondsToStretchTo) / medianTime
 		event[1] /= 1000000
@@ -393,7 +389,7 @@ def getTimeSpentPlayingNote(eventList,note):
 def countNoteFrequencies(eventList):
 	freqs = {}
 	for event in eventList:
-		if event[2] == 'on' or event[2] == 'on for the first time' or event[2] == 'on for the last time' or event[2] == 'on for the first and last time':
+		if event[2][0:3] == 'on':
 			if event[0] not in freqs:
 				freqs[event[0]] = 1
 			else:
@@ -401,21 +397,33 @@ def countNoteFrequencies(eventList):
 	return freqs
 
 #starting at startTime seconds (normally where the last game ended),
-#finds all events less than duration seconds after startTime
+#finds the first On event and then
+#finds all events less than duration seconds after the time of that first On event.
 #and returns that slice of the array
 def trimToInterval(events,startTime,duration):
+	endTime = startTime + duration
 	startIndex = 0
 	startHasBeenFound = False
 	stopIndex = 0
+	stopHasBeenFound = False
 	i = 0
 	while(i < len(events)):
-		if not (startHasBeenFound == True) and events[i][1] >= startTime:
+		if not startHasBeenFound and events[i][1] >= startTime and events[i][2] == 'on':
 			startHasBeenFound = True
 			startIndex = i
-		if events[i][1] > duration + startTime:
+			startTime = events[i][1]
+			endTime = startTime + duration
+		if events[i][1] > endTime:
 			stopIndex = i
 			i = len(events)
+			stopHasBeenFound = True
 		i += 1
+	if not(startHasBeenFound):
+		print("trimToInterval failed - Tried to trim events starting from a time before or after the interval")
+		return events
+	elif not(stopHasBeenFound):
+		print("trimToInterval failed - There's not enough time in the events to have an interval that long")
+		return events
 	return events[startIndex:stopIndex]
 
 
@@ -453,7 +461,8 @@ def findFirstAndLastEventsForEachNote(eventList,timeSorted=True):
 #returns an edited version of eventList such that the first on and off events for each note are labeled as such
 #and so are the last on and off events
 #assumes duplicate and overlapping events have been trimmed away
-def labelFirstAndLastEventsForEachNote(eventList,timeSorted=True):
+#also resolves situations where trimToInterval caused Off event to be first or On event to be last for a note
+def labelFirstAndLastEventsForEachNote(eventList,duration,timeSorted=True):
 	dicts = findFirstAndLastEventsForEachNote(eventList,timeSorted=timeSorted)
 	noteSet = set([event[0] for event in eventList])
 	notesWithFirstOnIndices = dicts[0]
@@ -466,12 +475,30 @@ def labelFirstAndLastEventsForEachNote(eventList,timeSorted=True):
 		firstOffIndex = notesWithFirstOffIndices[note]
 		lastOnIndex = notesWithLastOnIndices[note]
 		lastOffIndex = notesWithLastOffIndices[note]
-		if(lastOffIndex == -1 or firstOffIndex == -1 or firstOnIndex == -1 or lastOnIndex == -1):
-			print("note:",note)
-			print('firstOnIndex:',firstOnIndex)
-			print('firstOffIndex:',firstOffIndex)
-			print('lastOnIndex:',lastOnIndex)
-			print('lastOffIndex:',lastOffIndex)
+		if(lastOffIndex == -1 or firstOffIndex == -1):
+			# print("no off event found for note",note)
+			eventList[firstOnIndex][2] = 'on for the first and last time'
+			trackOfOnEvent = eventList[firstOnIndex][3]
+			eventList.append([note,duration,'off for the first and last time',trackOfOnEvent])
+		elif(firstOnIndex == -1 or lastOnIndex == -1):
+			# print("no on event found for note:",note)
+			eventList[firstOffIndex][2] = 'off for the first and last time'
+			trackOfOffEvent = eventList[firstOffIndex][3]
+			eventList.append([note,0,'on for the first and last time',trackOfOffEvent])
+		elif(firstOffIndex < firstOnIndex):
+			# print("for note",note,"an off event occurred before the first on event")
+			trackOfOffEvent = eventList[firstOffIndex][3]
+			eventList[firstOffIndex][2] = 'off for the first time'
+			eventList.append([note,0,'on for the first time',trackOfOffEvent])
+			eventList[lastOnIndex][2] = 'on for the last time'
+			eventList[lastOffIndex][2] = 'off for the last time'
+		elif(lastOnIndex > lastOffIndex):
+			# print("for note",note,"an on event occurred after the last off event")
+			trackOfOnEvent = eventList[lastOnIndex][3]
+			eventList[lastOnIndex][2] = 'on for the last time'
+			eventList.append([note,duration,'off for the last time',trackOfOnEvent])
+			eventList[firstOnIndex][2] = 'on for the first time'
+			eventList[firstOffIndex][2] = 'off for the first time'
 		else:
 			if(firstOnIndex == lastOnIndex):
 				eventList[firstOnIndex][2] = 'on for the first and last time'
@@ -483,10 +510,6 @@ def labelFirstAndLastEventsForEachNote(eventList,timeSorted=True):
 			else:
 				eventList[firstOffIndex][2] = 'off for the first time'
 				eventList[lastOffIndex][2] = 'off for the last time'
-			if(firstOffIndex < firstOnIndex):
-				print("for note",note,"an off event occurred before the first on event")
-			if(lastOnIndex > lastOffIndex):
-				print("for note",note,"an on event occurred after the last off event")
 
 	return eventList
 
@@ -519,24 +542,22 @@ def printEventsOverTime(eventList):
 
 # brings everything together. Given filename and track numbers to be included from the command line arguments,
 # generates an initial list of game events and times they are associated with.
-#TODO:
-#	-trimOverlappingEvents should handle big ol' fusterclucks of notes
-#	-labelFirstAndLastEventsForEachNote should remove off events for notes that start before the interval
-#	and create off events at the end of the interval for notes that end after it
-#   	-there should be a method to write events to a file for better integration with the rest of whatever game this is.
-def createGameEventList(filename, tracknums, startTime=0,duration=2500):
+#TODO: there should be a method to write events to a file for better integration with the rest of the game
+def createGameEventList(filename, tracknums, startTime=1500,duration=3600):
 	eventList = createEventList(filename,tracknums)
 	eventList = adjustForTimeSignatureChanges(eventList)
-	if(len(eventList) == 0):
-		print("there were no events except tempo changes")
-		return eventList
 	eventList = trimOverlappingEvents(eventList)
-	eventList = stretchTime(eventList)
 	eventList.sort(key = lambda x: int(x[1]))
+	numberOfSecondsToStretchTo = 65
+	eventList = stretchTime(eventList,numberOfSecondsToStretchTo)
 
 	eventList = trimToInterval(eventList,startTime,duration)
 	eventList = normalizeTimes(eventList)
-	eventList = labelFirstAndLastEventsForEachNote(eventList)
+	eventList = labelFirstAndLastEventsForEachNote(eventList,duration)
+	eventList.sort(key = lambda x: int(x[1]))
+	
+	#events are now finalized, so I will put them in a txt file.
+
 	return eventList
 
 if(len(sys.argv) < 3):
@@ -545,15 +566,20 @@ if(len(sys.argv) < 3):
 else:
 	filename = sys.argv[1]
 	tracknums = map(lambda x: int(x), sys.argv[2:])
+	events = createGameEventList(filename,tracknums)
+
 	# bytes = getByteList(filename)
 	# printByteInfo(bytes)
-	events = createGameEventList(filename,tracknums)
+
 	for event in events:
 		print(event)
+
 	printEventsOverTime(events)
-	# # freq = countNoteFrequencies(events)
-	# # for thing in reversed(sorted(freq)):
-	# # 	print(thing,freq[thing], getTimeSpentPlayingNote(events,thing))
+
+	# freq = countNoteFrequencies(events)
+	# for thing in reversed(sorted(freq)):
+	# 	print(thing,freq[thing], getTimeSpentPlayingNote(events,thing))
+
 	# noteSet = set([event[0] for event in events])
 	# for note in noteSet:
 	# 	eventsForNote = getEventsForNote(events,note)
