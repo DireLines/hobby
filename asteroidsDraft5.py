@@ -37,6 +37,7 @@ historyFrame = [1]
 jumpDistance = [4]
 currentJumps = {}
 jumps = []
+numJumps = [0]
 
 #math helper functions
 def dist(p1,p2):
@@ -148,9 +149,8 @@ def findJumps(asteroids, t, finalStep = False):
                     if(currentJumps[astIdPair][0] == True): #this means the jump is a continuation
                         currentJumps[astIdPair][2] = t
                     else: #this means it's a new jump for a previous pair
-                        currentJumps[astIdPair][1] = t
-                        currentJumps[astIdPair][2] = t
-                else:
+                        currentJumps[astIdPair] = [True,t,t]
+                else: #new jump for previously unmatched pair
                     currentJumps[astIdPair] = [True,t,t]
             j += 1
     for astIdPair in currentJumps: #make jumps that have ended flagged as such
@@ -171,7 +171,7 @@ def findJumps(asteroids, t, finalStep = False):
 
 
 class History: #positions of stuff over time
-    def __init__ (self, asteroidData=[], times = [], steps=1500,frame = 0):
+    def __init__ (self, asteroidData=[], times = [], steps=1000,frame = 0):
         self.asteroidData = asteroidData
         self.times = times
         self.steps = steps
@@ -235,7 +235,7 @@ def seedBoard(board):
     baseVelocity = 0.5
     currentId = 0
     #Rock at the center
-    board.append(Asteroid(id=currentId,symbol='R', mass=6, properties=["emitsGravity"]))
+    board.append(Asteroid(id=currentId,symbol='R', mass=13, properties=["emitsGravity"]))
     #gravity test
     currentId += 1
     board.append(Asteroid(id=currentId,symbol='G',x=5,y=5,vel_x = random.uniform(-3.5*baseVelocity,3.5*baseVelocity), vel_y = random.uniform(-3.5*baseVelocity,3.5*baseVelocity), properties = ['affectedByGravity']))
@@ -353,8 +353,10 @@ def isOnScreen(pixel):
 
 def fillInPossibleJumps(asteroids, time):
     jumpDisplayPoints = []
+    jumpCount = 0
     for jump in jumps:
         if(jump.startTime <= time and time <= jump.endTime):
+            jumpCount += 1
             otherAst = None
             asteroid = None
             for ast in asteroids:
@@ -372,6 +374,7 @@ def fillInPossibleJumps(asteroids, time):
             jumpDisplayPoints.append(midpoint(quarter,mid))
             jumpDisplayPoints.append(midpoint(mid,threequarters))
             jumpDisplayPoints.append(midpoint(threequarters,otherAst))
+    numJumps[0] = jumpCount
     return jumpDisplayPoints
 
 def printEverything():
@@ -403,6 +406,7 @@ def printEverything():
         for x in range(leftBound, rightBound):
             thisRow += pixels[(x,y)]
         print(thisRow)
+    print(str(numJumps[0]))
 
 def takePlayerInput():
     input = getch()[0]
