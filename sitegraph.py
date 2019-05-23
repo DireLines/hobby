@@ -30,6 +30,13 @@ def findSubList(sl,l):
             results.append((ind,ind+sll-1))
     return results
 
+def getDomain(url):
+    thirdslash = url.find('/',url.find('/',url.find('/')+1)+1)
+    url_base = url
+    if(thirdslash != -1):
+        url_base = url[0:thirdslash]
+    return url_base
+
 def getHTML(url):
     return requests.get(url).text
 
@@ -53,15 +60,21 @@ def getHrefs(url):
 
 def getLinks(url):
     hrefs = getHrefs(url)
-    thirdslash = url.find('/',url.find('/',url.find('/')+1)+1)
-    url_base = url
-    if(thirdslash != -1):
-        url_base = url[0:thirdslash]
+    url_base = getDomain(url)
     links = []
+    num_local_links = 0
     for hrefText in hrefs:
         linkText = hrefText
-        if(len(hrefText) == 0):
+        if(len(hrefText) == 0):#blank href
             continue
+        if(hrefText[-4:] == ".jpg" or hrefText[-4:] == ".png"):#links to a file
+            continue
+        if(hrefText[0] == "#"):#links to the same page but triggers a script change
+            continue
+        if('<' in hrefText):#some django bullshit I think
+            continue 
+        if ("://" not in hrefText):#if no protocol specified, assume link is local without leading slash
+            linkText = url_base + "/" + hrefText
         if(hrefText[0] == '/'):
             if(len(hrefText) > 1 and hrefText[1]=='/'):
                 linkText = "https:" + hrefText
@@ -70,9 +83,13 @@ def getLinks(url):
         if(linkText[0:4] == "http"):
             if(linkText in links):
                 continue
+            if(url_base == getDomain(linkText)):
+                num_local_links += 1
             links.append(linkText)
         # else:
-            # print('\t\t',hrefText,"rejected")
+        #     print("\t\trejected",linkText)
+    print('\t',num_local_links,"local links")
+    print('\t',len(links),'links')
     return links
 
 
@@ -81,5 +98,5 @@ links = getLinks(url)
 for i in range(len(links)):
     link = links[i]
     print(i+1,'/',len(links),':',link)
-    print('\t',len(getLinks(link)),'links')
+    getLinks(link)
 print("\n\n\n\n\n\n\n\n\n\n\n\n\n\n")
